@@ -4,6 +4,7 @@ from collections import Counter
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import ValidationError
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
@@ -43,6 +44,12 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     except FoundryResponsesError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
+    if not isinstance(case_json, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Supervisor returned an invalid case report",
+        )
+
     reasons = case_json.get("reasons")
     if not isinstance(reasons, list):
         reasons = []
@@ -56,30 +63,42 @@ def chat(req: ChatRequest, db: Session = Depends(get_db)):
     if not isinstance(redactions_raw, list):
         redactions_raw = []
 
-    redactions = []
-    for redaction in redactions_raw:
-        if isinstance(redaction, dict):
-            redaction.setdefault("type", "unknown")
-            redactions.append(RedactionItem(**redaction))
+    try:
+        redactions = []
+        for redaction in redactions_raw:
+            if isinstance(redaction, dict):
+                redaction.setdefault("type", "unknown")
+                redactions.append(RedactionItem(**redaction))
 
-    case_out = CaseReportOut(
-        case_type=str(_safe_get(case_json, "case_type", "")),
-        risk_level=str(_safe_get(case_json, "risk_level", "LOW")).upper(),  # type: ignore
-        risk_score=float(_safe_get(case_json, "risk_score", 0.0) or 0.0),
-        recommended_action=str(
-            _safe_get(case_json, "recommended_action", "ALLOW")
-        ).upper(),
-        reasons=[str(value) for value in reasons if isinstance(value, (str, int, float))],
-        policy_citations=policy_citations,
-        questions_for_human=[
-            str(value)
-            for value in questions_for_human
-            if isinstance(value, (str, int, float))
-        ],
-        audit_summary=str(_safe_get(case_json, "audit_summary", "")),
-        confidence=float(_safe_get(case_json, "confidence", 0.0) or 0.0),
-        redactions=redactions,
-    )
+        case_out = CaseReportOut(
+            case_type=str(_safe_get(case_json, "case_type", "")),
+            risk_level=str(  # type: ignore
+                _safe_get(case_json, "risk_level", "LOW")
+            ).upper(),
+            risk_score=float(_safe_get(case_json, "risk_score", 0.0) or 0.0),
+            recommended_action=str(
+                _safe_get(case_json, "recommended_action", "ALLOW")
+            ).upper(),
+            reasons=[
+                str(value)
+                for value in reasons
+                if isinstance(value, (str, int, float))
+            ],
+            policy_citations=policy_citations,
+            questions_for_human=[
+                str(value)
+                for value in questions_for_human
+                if isinstance(value, (str, int, float))
+            ],
+            audit_summary=str(_safe_get(case_json, "audit_summary", "")),
+            confidence=float(_safe_get(case_json, "confidence", 0.0) or 0.0),
+            redactions=redactions,
+        )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="Supervisor returned an invalid case report",
+        ) from error
     case_out_dict = case_out.model_dump()
     sanitized_content = apply_redactions(text, redactions_raw)
     final_answer = final_user_message(case_json)
@@ -165,4 +184,3 @@ def kpis(db: Session = Depends(get_db)):
 @router.get("/health")
 def health():
     return {"ok": True}
-
